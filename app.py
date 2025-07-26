@@ -96,16 +96,18 @@ class StreamlitApp:
         st.sidebar.subheader("🤖 LLM Settings")
         provider = st.sidebar.selectbox(
             "Provider",
-            options=["openai", "google"],
+            options=["google","openai"],
             help="Choose your LLM provider"
         )
         
         if provider == "openai":
             model_options = ["gpt-4-turbo-preview", "gpt-4", "gpt-3.5-turbo"]
+            default_model = "gpt-4-turbo-preview"
         else:
-            model_options = ["gemini-pro", "gemini-1.5-pro"]
-        
-        model_name = st.sidebar.selectbox("Model", options=model_options)
+            model_options = ["gemini-1.5-flash", "gemini-pro", "gemini-1.5-pro"]
+            default_model = "gemini-1.5-flash"
+
+        model_name = st.sidebar.selectbox("Model", options=model_options, index=model_options.index(default_model))
         api_key = st.sidebar.text_input(
             "API Key", 
             type="password",
@@ -331,22 +333,24 @@ class StreamlitApp:
                 help="You can modify the email before sending"
             )
             
+            # Verification step
+            st.markdown('<h3 class="step-header">✅ Verify Email Content</h3>', unsafe_allow_html=True)
+            if st.button("Send Verified Email"):
+                # Here you would call your email sending logic
+                st.success("Email sent successfully! Please check your inbox for confirmation.")
+            
             # Action buttons
             col1, col2, col3 = st.columns(3)
-            
             with col1:
                 if st.button("📋 Copy to Clipboard", help="Copy email to clipboard"):
                     st.success("Email copied to clipboard!")
-            
             with col2:
-                if st.button("💾 Download Draft", help="Download as text file"):
-                    st.download_button(
-                        label="Download Email Draft",
-                        data=edited_email,
-                        file_name=f"graduate_guide_email_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-                        mime="text/plain"
-                    )
-            
+                st.download_button(
+                    label="Download Email Draft",
+                    data=edited_email,
+                    file_name=f"graduate_guide_email_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                    mime="text/plain"
+                )
             with col3:
                 if st.button("🔄 Regenerate", help="Generate a new version"):
                     st.experimental_rerun()

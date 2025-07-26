@@ -157,7 +157,7 @@ class GraduateGuideAgent:
             )
         elif provider == "google":
             return ChatGoogleGenerativeAI(
-                model=llm_config.get("model_name", "gemini-pro"),
+                model=llm_config.get("model_name", "gemini-1.5-flash"),
                 google_api_key=llm_config.get("api_key"),
                 temperature=llm_config.get("temperature", 0.7),
                 max_output_tokens=llm_config.get("max_tokens", 2000)
@@ -298,8 +298,8 @@ class GraduateGuideAgent:
         
         try:
             result = chain.invoke({
-                "profile_content": profile_content[:3000],  # Limit content length
-                "paper_contents": "\n\n".join(paper_contents)[:4000],
+                "profile_content": profile_content[:100],  # Limit content length
+                "paper_contents": "\n\n".join(paper_contents)[:100],
                 "student_interests": ", ".join(state["profile_insights"].research_interests) if state["profile_insights"] else "",
                 "format_instructions": parser.get_format_instructions()
             })
@@ -465,41 +465,43 @@ class GraduateGuideAgent:
         """Present email to user for approval"""
         logger.info("Awaiting user approval...")
         
-        print("\n" + "="*50)
-        print("GENERATED EMAIL DRAFT")
-        print("="*50)
-        print(state["email_draft"])
-        print("="*50)
+        # print("\n" + "="*50)
+        # print("GENERATED EMAIL DRAFT")
+        # print("="*50)
+        # print(state["email_draft"])
+        # print("="*50)
         
-        if state["quality_assessment"]:
-            print(f"\nQuality Score: {state['quality_assessment'].overall_quality}/10")
-            if state["quality_assessment"].feedback:
-                print(f"Feedback: {state['quality_assessment'].feedback}")
+        # if state["quality_assessment"]:
+        #     print(f"\nQuality Score: {state['quality_assessment'].overall_quality}/10")
+        #     if state["quality_assessment"].feedback:
+        #         print(f"Feedback: {state['quality_assessment'].feedback}")
         
-        print("\nOptions:")
-        print("1. Send email")
-        print("2. Revise email")
-        print("3. Cancel")
+        # print("\nOptions:")
+        # print("1. Send email")
+        # print("2. Revise email")
+        # print("3. Cancel")
         
-        choice = input("\nYour choice (1-3): ").strip()
+        # choice = input("\nYour choice (1-3): ").strip()
         
-        if choice == "1":
-            state["approved_by_user"] = True
-        elif choice == "2":
-            state["approved_by_user"] = False
-            # Reset iteration count for user-requested revision
-            if state["iteration_count"] >= state["max_iterations"]:
-                state["iteration_count"] = 0
-        else:
-            state["approved_by_user"] = None  # Cancel
+        # if choice == "1":
+        #     state["approved_by_user"] = True
+        # elif choice == "2":
+        #     state["approved_by_user"] = False
+        #     # Reset iteration count for user-requested revision
+        #     if state["iteration_count"] >= state["max_iterations"]:
+        #         state["iteration_count"] = 0
+        # else:
+        #     state["approved_by_user"] = None  # Cancel
         
         return state
     
     def is_approved(self, state: GraduateGuideState) -> str:
-        """Check user approval status"""
-        if state["approved_by_user"] is True:
+        """Check user approval status from Streamlit"""
+        # Instead of CLI, get approval from state (set by Streamlit)
+        approval = state.get("user_approval")
+        if approval == "Send email":
             return "send"
-        elif state["approved_by_user"] is False:
+        elif approval == "Revise email":
             return "revise"
         else:
             return "cancel"
@@ -593,7 +595,7 @@ class GraduateGuideAgent:
             chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
             text = ' '.join(chunk for chunk in chunks if chunk)
             
-            return text[:5000]  # Limit content length
+            return text[:500]  # Limit content length
             
         except Exception as e:
             logger.error(f"Error scraping {url}: {e}")

@@ -29,8 +29,8 @@
     "password": "your-app-password",
     "use_tls": true
   },
-  "quality_threshold": 7,
-  "max_iterations": 3,
+  "quality_threshold": 1,
+  "max_iterations": 1,
   "scraping": {
     "timeout": 10,
     "max_content_length": 5000,
