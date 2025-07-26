@@ -1,0 +1,48 @@
+{
+  "llm": {
+    "provider": "openai",
+    "model_name": "gpt-4-turbo-preview",
+    "api_key": "your-openai-api-key-here",
+    "temperature": 0.7,
+    "max_tokens": 2000
+  },
+  "llm_alternatives": {
+    "google": {
+      "provider": "google",
+      "model_name": "gemini-pro",
+      "api_key": "your-google-api-key-here",
+      "temperature": 0.7,
+      "max_tokens": 2000
+    },
+    "openai_gpt35": {
+      "provider": "openai",
+      "model_name": "gpt-3.5-turbo",
+      "api_key": "your-openai-api-key-here",
+      "temperature": 0.7,
+      "max_tokens": 2000
+    }
+  },
+  "email": {
+    "smtp_server": "smtp.gmail.com",
+    "smtp_port": 587,
+    "username": "your-email@gmail.com",
+    "password": "your-app-password",
+    "use_tls": true
+  },
+  "quality_threshold": 7,
+  "max_iterations": 3,
+  "scraping": {
+    "timeout": 10,
+    "max_content_length": 5000,
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+  },
+  "pdf": {
+    "max_pages": 20,
+    "max_size_mb": 10
+  },
+  "logging": {
+    "level": "INFO",
+    "log_file": "graduate_guide.log",
+    "audit_log_dir": "audit_logs"
+  }
+}

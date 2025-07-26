@@ -1,0 +1,41 @@
+# Core LangGraph and LangChain dependencies
+langgraph>=0.0.40
+langchain>=0.1.0
+langchain-core>=0.1.0
+langchain-openai>=0.0.8
+langchain-google-genai>=0.0.6
+
+# LLM and AI dependencies
+openai>=1.0.0
+google-generativeai>=0.3.0
+
+# Data processing and parsing
+pydantic>=2.0.0
+PyPDF2>=3.0.0
+beautifulsoup4>=4.12.0
+requests>=2.31.0
+pandas>=2.0.0
+
+# Email functionality
+#smtplib-ssl>=1.0.0
+
+# Utilities
+python-dotenv>=1.0.0
+typing-extensions>=4.0.0
+
+# Web UI
+streamlit>=1.32.0
+
+# Development and testing (optional)
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+black>=23.0.0
+flake8>=6.0.0
+
+# Optional: For advanced PDF processing
+pymupdf>=1.23.0  # Alternative to PyPDF2 for better PDF handling
+pdfplumber>=0.9.0  # Another PDF processing option
+
+# Optional: For better web scraping
+selenium>=4.15.0  # For dynamic content scraping
+newspaper3k>=0.2.8  # For article extraction
