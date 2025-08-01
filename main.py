@@ -5,6 +5,7 @@ Built with LangGraph for workflow orchestration and flexible LLM configuration
 
 import json
 import logging
+import os
 from typing import Dict, List, Optional, Any, TypedDict
 from dataclasses import dataclass, asdict
 from datetime import datetime
@@ -25,6 +26,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, Field
+from document_processor import DocumentProcessor, ProgressiveContextBuilder, CVSummary, PaperSummary
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -92,11 +94,18 @@ class GraduateGuideState(TypedDict):
     email_draft: str
     quality_assessment: Optional[EmailQuality]
     
+    # New fields for document processing
+    cv_summary: Optional[CVSummary]
+    cv_concise: str
+    processed_context: str
+    context_metadata: Dict[str, Any]
+    
     # Workflow control
     iteration_count: int
     max_iterations: int
     approved_by_user: bool
     email_sent: bool
+    user_approval: Optional[str]  # Add this field
     
     # Logging
     audit_log: List[Dict[str, Any]]
@@ -109,8 +118,14 @@ class GraduateGuideAgent:
         """Initialize the agent with configuration"""
         self.config = self._load_config(config_path)
         self.llm = self._initialize_llm()
-        self.workflow = self._build_workflow()
         
+        # Initialize document processors
+        self.cheap_llm = self._initialize_cheap_llm()
+        self.doc_processor = DocumentProcessor(self.cheap_llm, self.llm)
+        self.context_builder = ProgressiveContextBuilder(max_tokens=6000)
+        
+        self.workflow = self._build_workflow()
+    
     def _load_config(self, config_path: str) -> Dict[str, Any]:
         """Load configuration from JSON file"""
         try:
@@ -165,6 +180,28 @@ class GraduateGuideAgent:
         else:
             raise ValueError(f"Unsupported LLM provider: {provider}")
     
+    def _initialize_cheap_llm(self):
+        """Initialize cheaper LLM for document processing"""
+        llm_config = self.config.get("llm", {})
+        provider = llm_config.get("provider", "openai")
+        
+        if provider == "openai":
+            return ChatOpenAI(
+                model="gpt-3.5-turbo",  # Use cheaper model
+                api_key=llm_config.get("api_key"),
+                temperature=0.3,  # Lower temperature for extraction
+                max_tokens=1000
+            )
+        elif provider == "google":
+            return ChatGoogleGenerativeAI(
+                model="gemini-1.5-flash",  # Already a cheaper model
+                google_api_key=llm_config.get("api_key"),
+                temperature=0.3,
+                max_output_tokens=1000
+            )
+        else:
+            return self.llm  # Fallback to main LLM
+    
     def _build_workflow(self) -> StateGraph:
         """Build the LangGraph workflow"""
         workflow = StateGraph(GraduateGuideState)
@@ -215,40 +252,28 @@ class GraduateGuideAgent:
         """Extract insights from user's CV and background"""
         logger.info("Extracting profile insights...")
         
-        parser = PydanticOutputParser(pydantic_object=ProfileInsights)
-        prompt = ChatPromptTemplate.from_template("""
-        Analyze the following CV content and background summary to extract key insights:
-        
-        CV Content:
-        {cv_content}
-        
-        Background Summary:
-        {background_summary}
-        
-        Extract the following information:
-        - Research interests and areas of focus
-        - Technical skills and expertise
-        - Publications, projects, or notable work
-        - Academic background summary
-        - Relevant work or research experience
-        
-        {format_instructions}
-        """)
-        
-        chain = prompt | self.llm | parser
-        
         try:
-            result = chain.invoke({
-                "cv_content": state["cv_content"],
-                "background_summary": state["background_summary"],
-                "format_instructions": parser.get_format_instructions()
-            })
+            # Process CV using document processor
+            cv_summary, cv_concise = self.doc_processor.process_cv(state["cv_content"])
             
-            state["profile_insights"] = result
+            # Store structured summary
+            state["cv_summary"] = cv_summary
+            state["cv_concise"] = cv_concise
+            
+            # Convert to ProfileInsights for compatibility
+            state["profile_insights"] = ProfileInsights(
+                research_interests=cv_summary.research_interests,
+                technical_skills=cv_summary.technical_skills,
+                publications=cv_summary.publications,
+                academic_background="; ".join(cv_summary.education),
+                relevant_experience=cv_summary.experience
+            )
+            
             state["audit_log"].append({
                 "timestamp": datetime.now().isoformat(),
                 "action": "profile_extraction",
-                "status": "success"
+                "status": "success",
+                "cv_tokens": len(self.doc_processor.encoding.encode(cv_concise))
             })
             
         except Exception as e:
@@ -264,29 +289,43 @@ class GraduateGuideAgent:
         # Scrape professor's profile page
         profile_content = self._scrape_webpage(state["professor_url"])
         
-        # Scrape and analyze papers
-        paper_contents = []
-        for paper_url in state["paper_urls"]:
-            content = self._scrape_webpage(paper_url)
-            if content:
-                paper_contents.append(content)
+        # Process papers
+        paper_summaries = []
+        for paper_url in state["paper_urls"][:5]:  # Limit to 5 papers
+            paper_content = self._scrape_webpage(paper_url)
+            if paper_content:
+                try:
+                    paper_summary, paper_concise = self.doc_processor.process_paper(paper_content)
+                    paper_summaries.append((paper_summary, paper_concise))
+                except Exception as e:
+                    logger.warning(f"Error processing paper {paper_url}: {e}")
         
+        # Build context progressively
+        context_info = self.context_builder.build_context(
+            cv_summary=state.get("cv_summary"),
+            cv_text=state.get("cv_concise", ""),
+            professor_summary=profile_content[:1500],  # Limit professor profile
+            paper_summaries=paper_summaries,
+            background_summary=state["background_summary"]
+        )
+        
+        # Store processed information
+        state["processed_context"] = context_info["context"]
+        state["context_metadata"] = {
+            "token_count": context_info["token_count"],
+            "included_sections": context_info["included_sections"]
+        }
+        
+        # Now analyze with full context
         parser = PydanticOutputParser(pydantic_object=ProfessorResearch)
         prompt = ChatPromptTemplate.from_template("""
-        Analyze the professor's research based on their profile and recent papers:
+        Based on the following context, analyze the professor's research and alignment with the student:
         
-        Professor Profile:
-        {profile_content}
-        
-        Recent Papers:
-        {paper_contents}
-        
-        Student's Research Interests (for alignment):
-        {student_interests}
+        {full_context}
         
         Extract and analyze:
         - Main research areas and themes
-        - Summary of recent work and contributions
+        - Summary of recent work and contributions  
         - Key methodologies and approaches used
         - Points of alignment with the student's interests
         - Notable findings or innovations
@@ -298,9 +337,7 @@ class GraduateGuideAgent:
         
         try:
             result = chain.invoke({
-                "profile_content": profile_content[:100],  # Limit content length
-                "paper_contents": "\n\n".join(paper_contents)[:100],
-                "student_interests": ", ".join(state["profile_insights"].research_interests) if state["profile_insights"] else "",
+                "full_context": context_info["context"],
                 "format_instructions": parser.get_format_instructions()
             })
             
@@ -308,7 +345,9 @@ class GraduateGuideAgent:
             state["audit_log"].append({
                 "timestamp": datetime.now().isoformat(),
                 "action": "professor_analysis",
-                "status": "success"
+                "status": "success",
+                "context_tokens": context_info["token_count"],
+                "papers_processed": len(paper_summaries)
             })
             
         except Exception as e:
@@ -321,57 +360,36 @@ class GraduateGuideAgent:
         """Generate personalized email draft"""
         logger.info(f"Generating email draft (iteration {state['iteration_count'] + 1})")
         
+        # Use the processed context for email generation
         prompt = ChatPromptTemplate.from_template("""
         Generate a professional, personalized email to a professor for graduate school inquiry.
         
-        Student Profile:
-        - Research Interests: {research_interests}
-        - Technical Skills: {technical_skills}
-        - Academic Background: {academic_background}
-        - Publications/Projects: {publications}
-        - Experience: {experience}
-        
-        Professor's Research:
-        - Research Areas: {prof_research_areas}
-        - Recent Work: {prof_recent_work}
-        - Key Methods: {prof_methods}
-        - Alignment Points: {alignment_points}
-        - Notable Findings: {notable_findings}
+        Context and Information:
+        {processed_context}
         
         Previous Quality Feedback (if any): {previous_feedback}
         
         Email Guidelines:
         1. Professional but not overly formal tone
-        2. Clear subject line
-        3. Brief introduction of student
-        4. Specific reference to professor's work showing genuine interest
-        5. Clear explanation of research alignment
-        6. Specific request (meeting, discussion, application guidance)
-        7. Professional closing
-        8. Keep to 300-400 words maximum
+        2. Clear subject line starting with "Subject: "
+        3. Brief introduction of student (2-3 sentences)
+        4. Specific reference to 1-2 of professor's recent papers or work
+        5. Clear explanation of research alignment (2-3 specific points)
+        6. Mention 1-2 relevant skills or experiences
+        7. Specific request (meeting, discussion, application guidance)
+        8. Professional closing
+        9. Keep to 300-400 words maximum
         
-        Generate a complete email including subject line.
+        The email should demonstrate genuine understanding of the professor's work and clear alignment.
         """)
         
         try:
-            profile = state["profile_insights"]
-            research = state["professor_research"]
             previous_feedback = ""
-            
             if state["quality_assessment"]:
                 previous_feedback = state["quality_assessment"].feedback
             
             result = self.llm.invoke(prompt.format_messages(
-                research_interests=", ".join(profile.research_interests) if profile else "",
-                technical_skills=", ".join(profile.technical_skills) if profile else "",
-                academic_background=profile.academic_background if profile else "",
-                publications=", ".join(profile.publications) if profile else "",
-                experience=", ".join(profile.relevant_experience) if profile else "",
-                prof_research_areas=", ".join(research.research_areas) if research else "",
-                prof_recent_work=research.recent_work_summary if research else "",
-                prof_methods=", ".join(research.key_methodologies) if research else "",
-                alignment_points=", ".join(research.alignment_points) if research else "",
-                notable_findings=", ".join(research.notable_findings) if research else "",
+                processed_context=state.get("processed_context", ""),
                 previous_feedback=previous_feedback
             ))
             
@@ -381,7 +399,8 @@ class GraduateGuideAgent:
                 "timestamp": datetime.now().isoformat(),
                 "action": "email_generation",
                 "iteration": state["iteration_count"],
-                "status": "success"
+                "status": "success",
+                "context_sections": state.get("context_metadata", {}).get("included_sections", [])
             })
             
         except Exception as e:
@@ -566,9 +585,9 @@ class GraduateGuideAgent:
             "email_sent": state.get("email_sent", False),
             "total_iterations": state["iteration_count"]
         })
-        
+        os.makedirs("logs", exist_ok=True)
         # Save audit log to file
-        log_filename = f"graduate_guide_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        log_filename = f"logs/graduate_guide_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         with open(log_filename, 'w') as f:
             json.dump(state["audit_log"], f, indent=2)
         
@@ -630,6 +649,10 @@ class GraduateGuideAgent:
             professor_research=None,
             email_draft="",
             quality_assessment=None,
+            cv_summary=None,
+            cv_concise="",
+            processed_context="",
+            context_metadata={},
             iteration_count=0,
             max_iterations=self.config.get("max_iterations", 3),
             approved_by_user=False,
