@@ -6,7 +6,7 @@ Built with LangGraph for workflow orchestration and flexible LLM configuration
 import json
 import logging
 import os
-from typing import Dict, List, Optional, Any, TypedDict
+from typing import Dict, List, Optional, Any, TypedDict, Tuple
 from dataclasses import dataclass, asdict
 from datetime import datetime
 import smtplib
@@ -54,19 +54,19 @@ class EmailConfig:
 # Pydantic Models for Structured Output
 class ProfileInsights(BaseModel):
     """Extracted insights from user's CV and background"""
-    research_interests: List[str] = Field(description="Key research areas of interest")
-    technical_skills: List[str] = Field(description="Technical skills and expertise")
-    publications: List[str] = Field(description="Notable publications or projects")
-    academic_background: str = Field(description="Educational background summary")
-    relevant_experience: List[str] = Field(description="Relevant work or research experience")
+    research_interests: List[str] = Field(description="Key research areas of interest", default=[])
+    technical_skills: List[str] = Field(description="Technical skills and expertise", default=[])
+    publications: List[str] = Field(description="Notable publications or projects", default=[])
+    academic_background: str = Field(description="Educational background summary", default="")
+    relevant_experience: List[str] = Field(description="Relevant work or research experience", default=[])
 
 class ProfessorResearch(BaseModel):
     """Professor's research analysis"""
-    research_areas: List[str] = Field(description="Professor's main research areas")
-    recent_work_summary: str = Field(description="Summary of recent work")
-    key_methodologies: List[str] = Field(description="Key research methodologies used")
-    alignment_points: List[str] = Field(description="Points of alignment with student interests")
-    notable_findings: List[str] = Field(description="Notable research findings or contributions")
+    research_areas: List[str] = Field(description="Professor's main research areas", default=[])
+    recent_work_summary: str = Field(description="Summary of recent work", default="")
+    key_methodologies: List[str] = Field(description="Key research methodologies used", default=[])
+    alignment_points: List[str] = Field(description="Points of alignment with student interests", default=[])
+    notable_findings: List[str] = Field(description="Notable research findings or contributions", default=[])
 
 class EmailQuality(BaseModel):
     """Email quality assessment"""
@@ -76,7 +76,7 @@ class EmailQuality(BaseModel):
     citation_accuracy: bool = Field(description="Accuracy of paper citations")
     overall_quality: int = Field(ge=1, le=10, description="Overall quality score (1-10)")
     feedback: str = Field(description="Specific feedback for improvement")
-    passes_threshold: bool = Field(description="Whether email meets quality threshold")
+    passes_threshold: bool = Field(default=False, description="Whether email meets quality threshold")
 
 # State Management
 class GraduateGuideState(TypedDict):
@@ -86,7 +86,9 @@ class GraduateGuideState(TypedDict):
     background_summary: str
     target_filters: Dict[str, Any]
     professor_url: str
+    professor_text: Optional[str]  # Add manual text input option
     paper_urls: List[str]
+    paper_texts: List[str]  # Add manual text inputs for papers
     
     # Processing results
     profile_insights: Optional[ProfileInsights]
@@ -283,30 +285,55 @@ class GraduateGuideAgent:
         return state
     
     def analyze_professor_research(self, state: GraduateGuideState) -> GraduateGuideState:
-        """Analyze professor's research from URL and papers"""
+        """Analyze professor's research from URL, manual text, and papers"""
         logger.info("Analyzing professor's research...")
         
-        # Scrape professor's profile page
-        profile_content = self._scrape_webpage(state["professor_url"])
+        # Get professor profile content - either from URL or manual text
+        profile_content = ""
+        if state.get("professor_text") and state["professor_text"].strip():
+            profile_content = state["professor_text"][:1500]
+            logger.info("Using manual professor text input")
+        elif state.get("professor_url") and state["professor_url"].strip():
+            profile_content = self._scrape_webpage(state["professor_url"])
+            if not profile_content:
+                logger.warning("Failed to scrape professor URL, using empty content")
+        else:
+            logger.warning("No professor information provided")
         
-        # Process papers
+        # Process papers - both from URLs and manual text
         paper_summaries = []
-        for paper_url in state["paper_urls"][:5]:  # Limit to 5 papers
-            paper_content = self._scrape_webpage(paper_url)
-            if paper_content:
-                try:
-                    paper_summary, paper_concise = self.doc_processor.process_paper(paper_content)
-                    paper_summaries.append((paper_summary, paper_concise))
-                except Exception as e:
-                    logger.warning(f"Error processing paper {paper_url}: {e}")
+        
+        # Process papers from URLs
+        if state.get("paper_urls"):
+            for i, paper_url in enumerate(state["paper_urls"][:5]):  # Limit to 5 papers
+                if paper_url.strip():
+                    paper_content = self._scrape_webpage(paper_url)
+                    if paper_content:
+                        try:
+                            paper_summary, paper_concise = self.doc_processor.process_paper(paper_content)
+                            paper_summaries.append((paper_summary, paper_concise))
+                            logger.info(f"Processed paper {i+1} from URL")
+                        except Exception as e:
+                            logger.warning(f"Error processing paper {paper_url}: {e}")
+        
+        # Process papers from manual text
+        if state.get("paper_texts"):
+            for i, paper_text in enumerate(state["paper_texts"][:5]):  # Limit to 5 papers
+                if paper_text.strip():
+                    try:
+                        paper_summary, paper_concise = self.doc_processor.process_paper(paper_text)
+                        paper_summaries.append((paper_summary, paper_concise))
+                        logger.info(f"Processed paper {i+1} from manual text")
+                    except Exception as e:
+                        logger.warning(f"Error processing manual paper text {i+1}: {e}")
         
         # Build context progressively
         context_info = self.context_builder.build_context(
             cv_summary=state.get("cv_summary"),
             cv_text=state.get("cv_concise", ""),
-            professor_summary=profile_content[:1500],  # Limit professor profile
+            professor_summary=profile_content,
             paper_summaries=paper_summaries,
-            background_summary=state["background_summary"]
+            background_summary=state.get("background_summary", "")
         )
         
         # Store processed information
@@ -317,42 +344,49 @@ class GraduateGuideAgent:
         }
         
         # Now analyze with full context
-        parser = PydanticOutputParser(pydantic_object=ProfessorResearch)
-        prompt = ChatPromptTemplate.from_template("""
-        Based on the following context, analyze the professor's research and alignment with the student:
-        
-        {full_context}
-        
-        Extract and analyze:
-        - Main research areas and themes
-        - Summary of recent work and contributions  
-        - Key methodologies and approaches used
-        - Points of alignment with the student's interests
-        - Notable findings or innovations
-        
-        {format_instructions}
-        """)
-        
-        chain = prompt | self.llm | parser
-        
         try:
-            result = chain.invoke({
-                "full_context": context_info["context"],
-                "format_instructions": parser.get_format_instructions()
-            })
+            # Use structured text parsing instead of JSON
+            prompt = f"""
+            Based on the following context, analyze the professor's research and alignment with the student:
+
+            {context_info["context"]}
+
+            Provide analysis in this format:
+            RESEARCH_AREAS: [List main research areas, separated by commas]
+            RECENT_WORK: [Summary of recent work and contributions in 2-3 sentences]
+            METHODOLOGIES: [Key research methodologies, separated by commas]  
+            ALIGNMENT_POINTS: [Points of alignment with student interests, separated by commas]
+            NOTABLE_FINDINGS: [Notable research findings, separated by commas]
+            """
             
-            state["professor_research"] = result
+            result = self.llm.invoke(prompt)
+            response_text = result.content if hasattr(result, 'content') else str(result)
+            
+            # Parse the structured response
+            research_data = self._parse_professor_response(response_text)
+            
+            state["professor_research"] = ProfessorResearch(**research_data)
             state["audit_log"].append({
                 "timestamp": datetime.now().isoformat(),
                 "action": "professor_analysis",
                 "status": "success",
                 "context_tokens": context_info["token_count"],
-                "papers_processed": len(paper_summaries)
+                "papers_processed": len(paper_summaries),
+                "used_manual_prof_text": bool(state.get("professor_text")),
+                "used_manual_papers": len(state.get("paper_texts", []))
             })
             
         except Exception as e:
             logger.error(f"Error analyzing professor research: {e}")
             state["error_messages"].append(f"Professor analysis failed: {str(e)}")
+            # Create a basic fallback research object
+            state["professor_research"] = ProfessorResearch(
+                research_areas=["Unknown"],
+                recent_work_summary="Analysis failed",
+                key_methodologies=["Unknown"],
+                alignment_points=["Unknown"],
+                notable_findings=["Analysis incomplete"]
+            )
         
         return state
     
@@ -406,6 +440,20 @@ class GraduateGuideAgent:
         except Exception as e:
             logger.error(f"Error generating email: {e}")
             state["error_messages"].append(f"Email generation failed: {str(e)}")
+            # Create a fallback email if generation fails
+            if not state.get("email_draft"):
+                state["email_draft"] = """Subject: Graduate Research Inquiry
+
+Dear Professor,
+
+I am writing to express my interest in pursuing graduate research under your supervision. 
+I have reviewed your work and believe there is strong alignment with my research interests.
+
+I would appreciate the opportunity to discuss potential research opportunities.
+
+Thank you for your time and consideration.
+
+Best regards"""
         
         return state
     
@@ -413,62 +461,157 @@ class GraduateGuideAgent:
         """Evaluate the quality of the generated email"""
         logger.info("Evaluating email quality...")
         
-        parser = PydanticOutputParser(pydantic_object=EmailQuality)
-        prompt = ChatPromptTemplate.from_template("""
-        Evaluate the quality of this graduate school inquiry email:
-        
-        Email Draft:
-        {email_draft}
-        
-        Professor's Research Context:
-        {professor_context}
-        
-        Evaluate on these criteria (1-10 scale):
-        1. Professional tone and language
-        2. Clear structure and flow
-        3. Personalization and specific references to professor's work
-        4. Accuracy of any citations or references
-        5. Overall quality and effectiveness
-        
-        Quality threshold: {quality_threshold}/10
-        
-        Provide specific feedback for improvement if scores are below threshold.
-        
-        {format_instructions}
-        """)
-        
-        chain = prompt | self.llm | parser
-        
         try:
             research = state["professor_research"]
             quality_threshold = self.config.get("quality_threshold", 7)
             
-            result = chain.invoke({
-                "email_draft": state["email_draft"],
-                "professor_context": research.recent_work_summary if research else "",
-                "quality_threshold": quality_threshold,
-                "format_instructions": parser.get_format_instructions()
-            })
+            # Use a simpler approach without JSON parsing
+            prompt = f"""
+            Evaluate the quality of this graduate school inquiry email on a scale of 1-10:
+
+            Email Draft:
+            {state["email_draft"]}
+
+            Professor's Research Context:
+            {research.recent_work_summary if research else ""}
+
+            Provide evaluation in this format (use only numbers, no fractions):
+            TONE_SCORE: 8
+            STRUCTURE_SCORE: 7
+            PERSONALIZATION_SCORE: 9
+            CITATION_ACCURACY: true
+            OVERALL_QUALITY: 8
+            FEEDBACK: Specific feedback for improvement
+
+            Quality threshold: {quality_threshold}/10
+            Focus on professional tone, structure, personalization, accuracy, and overall effectiveness.
+            Use only integer scores from 1-10, not fractions like "8/10".
+            """
             
-            # Set passes_threshold based on overall quality
-            result.passes_threshold = result.overall_quality >= quality_threshold
+            result = self.llm.invoke(prompt)
+            response_text = result.content if hasattr(result, 'content') else str(result)
             
-            state["quality_assessment"] = result
+            # Parse the structured response
+            quality_data = self._parse_quality_response(response_text, quality_threshold)
+            
+            state["quality_assessment"] = EmailQuality(**quality_data)
             state["audit_log"].append({
                 "timestamp": datetime.now().isoformat(),
                 "action": "quality_evaluation",
-                "overall_score": result.overall_quality,
-                "passes": result.passes_threshold
+                "overall_score": quality_data["overall_quality"],
+                "passes": quality_data["passes_threshold"]
             })
             
         except Exception as e:
             logger.error(f"Error evaluating email quality: {e}")
             state["error_messages"].append(f"Quality evaluation failed: {str(e)}")
+            
+            # Create a basic fallback quality assessment
+            state["quality_assessment"] = EmailQuality(
+                tone_score=7,
+                structure_score=7,
+                personalization_score=6,
+                citation_accuracy=True,
+                overall_quality=6,
+                feedback="Quality evaluation failed, using default scores",
+                passes_threshold=False
+            )
         
         return state
     
+    def _parse_quality_response(self, response_text: str, quality_threshold: int) -> Dict[str, Any]:
+        """Parse quality evaluation response"""
+        
+        quality_data = {
+            "tone_score": 7,
+            "structure_score": 7,
+            "personalization_score": 6,
+            "citation_accuracy": True,
+            "overall_quality": 6,
+            "feedback": "Unable to parse quality evaluation",
+            "passes_threshold": False
+        }
+        
+        try:
+            for line in response_text.split('\n'):
+                line = line.strip()
+                if line.startswith('TONE_SCORE:'):
+                    score_str = line.split(':')[1].strip()
+                    # Handle formats like "9/10" or just "9"
+                    if '/' in score_str:
+                        score_str = score_str.split('/')[0]
+                    quality_data["tone_score"] = int(score_str)
+                elif line.startswith('STRUCTURE_SCORE:'):
+                    score_str = line.split(':')[1].strip()
+                    if '/' in score_str:
+                        score_str = score_str.split('/')[0]
+                    quality_data["structure_score"] = int(score_str)
+                elif line.startswith('PERSONALIZATION_SCORE:'):
+                    score_str = line.split(':')[1].strip()
+                    if '/' in score_str:
+                        score_str = score_str.split('/')[0]
+                    quality_data["personalization_score"] = int(score_str)
+                elif line.startswith('CITATION_ACCURACY:'):
+                    accuracy_str = line.split(':')[1].strip().lower()
+                    quality_data["citation_accuracy"] = accuracy_str == 'true'
+                elif line.startswith('OVERALL_QUALITY:'):
+                    score_str = line.split(':')[1].strip()
+                    if '/' in score_str:
+                        score_str = score_str.split('/')[0]
+                    quality_data["overall_quality"] = int(score_str)
+                elif line.startswith('FEEDBACK:'):
+                    quality_data["feedback"] = line.split(':', 1)[1].strip()
+            
+            # Compute passes_threshold based on overall quality
+            quality_data["passes_threshold"] = quality_data["overall_quality"] >= quality_threshold
+            
+        except Exception as e:
+            logger.warning(f"Error parsing quality response: {e}")
+            # Keep default values
+            
+        return quality_data
+    
+    def _parse_professor_response(self, response_text: str) -> Dict[str, Any]:
+        """Parse professor research response"""
+        
+        research_data = {
+            "research_areas": ["Unknown"],
+            "recent_work_summary": "Analysis not available",
+            "key_methodologies": ["Unknown"],
+            "alignment_points": ["Unknown"],
+            "notable_findings": ["Analysis incomplete"]
+        }
+        
+        try:
+            for line in response_text.split('\n'):
+                line = line.strip()
+                if line.startswith('RESEARCH_AREAS:'):
+                    areas_str = line.split(':', 1)[1].strip()
+                    research_data["research_areas"] = [a.strip() for a in areas_str.split(',') if a.strip()]
+                elif line.startswith('RECENT_WORK:'):
+                    research_data["recent_work_summary"] = line.split(':', 1)[1].strip()
+                elif line.startswith('METHODOLOGIES:'):
+                    methods_str = line.split(':', 1)[1].strip()
+                    research_data["key_methodologies"] = [m.strip() for m in methods_str.split(',') if m.strip()]
+                elif line.startswith('ALIGNMENT_POINTS:'):
+                    alignment_str = line.split(':', 1)[1].strip()
+                    research_data["alignment_points"] = [a.strip() for a in alignment_str.split(',') if a.strip()]
+                elif line.startswith('NOTABLE_FINDINGS:'):
+                    findings_str = line.split(':', 1)[1].strip()
+                    research_data["notable_findings"] = [f.strip() for f in findings_str.split(',') if f.strip()]
+            
+        except Exception as e:
+            logger.warning(f"Error parsing professor response: {e}")
+            # Keep default values
+            
+        return research_data
+    
     def should_regenerate(self, state: GraduateGuideState) -> str:
         """Determine if email should be regenerated based on quality"""
+        # If we have critical errors (like API failures), stop the cycle
+        if len(state["error_messages"]) > 3:
+            return "approve"  # Stop regenerating after multiple failures
+        
         if not state["quality_assessment"]:
             return "approve"  # If evaluation failed, proceed to approval
         
@@ -595,9 +738,16 @@ class GraduateGuideAgent:
         return state
     
     def _scrape_webpage(self, url: str) -> str:
-        """Scrape content from a webpage"""
+        """Scrape content from a webpage with better error handling"""
+        if not url or not url.strip():
+            return ""
+            
         try:
-            response = requests.get(url, timeout=10)
+            # Add headers to avoid some blocking
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            response = requests.get(url, timeout=10, headers=headers)
             response.raise_for_status()
             
             soup = BeautifulSoup(response.content, 'html.parser')
@@ -614,10 +764,19 @@ class GraduateGuideAgent:
             chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
             text = ' '.join(chunk for chunk in chunks if chunk)
             
-            return text[:500]  # Limit content length
+            return text[:5000]  # Limit content length to 5k chars
             
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 403:
+                logger.warning(f"Access forbidden for {url}. Website may be blocking scraping.")
+            else:
+                logger.error(f"HTTP error scraping {url}: {e}")
+            return ""
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request error scraping {url}: {e}")
+            return ""
         except Exception as e:
-            logger.error(f"Error scraping {url}: {e}")
+            logger.error(f"Unexpected error scraping {url}: {e}")
             return ""
     
     def _extract_text_from_pdf(self, pdf_content: bytes) -> str:
@@ -627,16 +786,33 @@ class GraduateGuideAgent:
             pdf_reader = PyPDF2.PdfReader(pdf_file)
             
             text = ""
-            for page in pdf_reader.pages:
-                text += page.extract_text() + "\n"
+            for page in pdf_reader.pages[:10]:  # Limit to first 10 pages to avoid huge texts
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text + "\n"
             
-            return text
+            return text[:10000]  # Limit to 10k characters
         except Exception as e:
             logger.error(f"Error extracting PDF text: {e}")
             return ""
     
+    def process_pdf_paper(self, pdf_content: bytes) -> Tuple[PaperSummary, str]:
+        """Process a PDF paper"""
+        try:
+            paper_text = self._extract_text_from_pdf(pdf_content)
+            if paper_text:
+                return self.doc_processor.process_paper(paper_text)
+            else:
+                empty_summary = PaperSummary()
+                return empty_summary, "Failed to extract PDF content"
+        except Exception as e:
+            logger.error(f"Error processing PDF paper: {e}")
+            empty_summary = PaperSummary()
+            return empty_summary, f"PDF processing failed: {str(e)}"
+    
     def run(self, cv_content: str, background_summary: str, target_filters: Dict[str, Any],
-            professor_url: str, paper_urls: List[str]) -> Dict[str, Any]:
+            professor_url: str = "", professor_text: str = "", paper_urls: List[str] = None, 
+            paper_texts: List[str] = None) -> Dict[str, Any]:
         """Run the complete GraduateGuide workflow"""
         
         initial_state = GraduateGuideState(
@@ -644,7 +820,9 @@ class GraduateGuideAgent:
             background_summary=background_summary,
             target_filters=target_filters,
             professor_url=professor_url,
-            paper_urls=paper_urls,
+            professor_text=professor_text,
+            paper_urls=paper_urls or [],
+            paper_texts=paper_texts or [],
             profile_insights=None,
             professor_research=None,
             email_draft="",
@@ -657,6 +835,7 @@ class GraduateGuideAgent:
             max_iterations=self.config.get("max_iterations", 3),
             approved_by_user=False,
             email_sent=False,
+            user_approval=None,
             audit_log=[],
             error_messages=[]
         )
@@ -672,12 +851,40 @@ class GraduateGuideAgent:
             "audit_log": final_state.get("audit_log", [])
         }
 
+    @staticmethod
+    def create_state_with_text_inputs(cv_content: str, background_summary: str, 
+                                    professor_text: str = "", paper_texts: List[str] = None,
+                                    professor_url: str = "", paper_urls: List[str] = None) -> Dict[str, Any]:
+        """Helper method to create initial state with text inputs"""
+        return {
+            "cv_content": cv_content,
+            "background_summary": background_summary,
+            "professor_text": professor_text,
+            "professor_url": professor_url,
+            "paper_texts": paper_texts or [],
+            "paper_urls": paper_urls or [],
+            "target_filters": {}
+        }
+    
+    def run_with_manual_inputs(self, state_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Run workflow with manually provided inputs"""
+        return self.run(
+            cv_content=state_dict.get("cv_content", ""),
+            background_summary=state_dict.get("background_summary", ""),
+            target_filters=state_dict.get("target_filters", {}),
+            professor_url=state_dict.get("professor_url", ""),
+            professor_text=state_dict.get("professor_text", ""),
+            paper_urls=state_dict.get("paper_urls", []),
+            paper_texts=state_dict.get("paper_texts", [])
+        )
+
+
 # Usage Example
 if __name__ == "__main__":
     # Initialize the agent
     agent = GraduateGuideAgent("config.json")
     
-    # Example usage
+    # Example 1: Using URLs (original approach)
     cv_content = """
     John Doe
     PhD Student in Computer Science
@@ -703,28 +910,66 @@ if __name__ == "__main__":
     medical imaging applications.
     """
     
-    target_filters = {
-        "country": "USA",
-        "universities": ["Stanford", "MIT", "CMU"]
-    }
-    
-    professor_url = "https://example-university.edu/faculty/professor-smith"
-    paper_urls = [
-        "https://arxiv.org/abs/example1",
-        "https://arxiv.org/abs/example2"
-    ]
-    
-    # Run the workflow
-    result = agent.run(
+    # Example with URLs
+    result1 = agent.run(
         cv_content=cv_content,
         background_summary=background_summary,
-        target_filters=target_filters,
-        professor_url=professor_url,
-        paper_urls=paper_urls
+        target_filters={"country": "USA", "universities": ["Stanford", "MIT", "CMU"]},
+        professor_url="https://example-university.edu/faculty/professor-smith",
+        paper_urls=[
+            "https://arxiv.org/abs/example1",
+            "https://arxiv.org/abs/example2"
+        ]
     )
     
-    print("Workflow Results:")
-    print(f"Email sent: {result['email_sent']}")
-    print(f"Iterations: {result['iterations']}")
-    if result['errors']:
-        print(f"Errors: {result['errors']}")
+    # Example 2: Using manual text inputs (new approach)
+    professor_text = """
+    Dr. Jane Smith is a Professor in the Computer Science Department at Stanford University.
+    Her research focuses on machine learning applications in healthcare, particularly
+    developing AI systems for medical image analysis and electronic health records.
+    
+    Recent work includes developing transformer-based models for radiology report generation
+    and federated learning approaches for privacy-preserving medical AI.
+    """
+    
+    paper_texts = [
+        """
+        Title: Transformer-Based Medical Report Generation
+        Abstract: This paper presents a novel approach to automatic medical report generation
+        using transformer architectures. We demonstrate significant improvements in accuracy
+        and clinical relevance compared to previous methods.
+        
+        Methods: We used a multi-head attention mechanism with domain-specific pretraining
+        on large medical text corpora. The model was fine-tuned on radiology reports.
+        
+        Results: Our approach achieved 92% accuracy on clinical evaluation metrics.
+        """,
+        """
+        Title: Privacy-Preserving Federated Learning in Healthcare
+        Abstract: We propose a federated learning framework that enables collaborative
+        medical AI development while preserving patient privacy.
+        
+        Methods: Differential privacy and secure aggregation protocols were implemented.
+        
+        Results: The federated model achieved comparable performance to centralized training
+        while maintaining privacy guarantees.
+        """
+    ]
+    
+    # Example with manual text inputs
+    result2 = agent.run(
+        cv_content=cv_content,
+        background_summary=background_summary,
+        target_filters={},
+        professor_text=professor_text,
+        paper_texts=paper_texts
+    )
+    
+    print("Example 1 (URLs) Results:")
+    print(f"Email sent: {result1['email_sent']}")
+    print(f"Iterations: {result1['iterations']}")
+    
+    print("\nExample 2 (Manual text) Results:")
+    print(f"Email sent: {result2['email_sent']}")
+    print(f"Iterations: {result2['iterations']}")
+    print(f"Final draft preview:\n{result2['final_draft'][:200]}...")

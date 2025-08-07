@@ -14,20 +14,20 @@ logger = logging.getLogger(__name__)
 
 class CVSummary(BaseModel):
     """Structured CV summary"""
-    education: List[str] = Field(description="Degrees, institutions, and years")
-    research_interests: List[str] = Field(description="Research interests and areas")
-    technical_skills: List[str] = Field(description="Technical skills and tools")
-    publications: List[str] = Field(description="Key publications with brief descriptions")
-    experience: List[str] = Field(description="Relevant research/work experience")
-    awards: List[str] = Field(description="Awards, honors, and achievements")
+    education: List[str] = Field(description="Degrees, institutions, and years", default=[])
+    research_interests: List[str] = Field(description="Research interests and areas", default=[])
+    technical_skills: List[str] = Field(description="Technical skills and tools", default=[])
+    publications: List[str] = Field(description="Key publications with brief descriptions", default=[])
+    experience: List[str] = Field(description="Relevant research/work experience", default=[])
+    awards: List[str] = Field(description="Awards, honors, and achievements", default=[])
 
 class PaperSummary(BaseModel):
     """Structured paper summary"""
-    title: str = Field(description="Paper title")
-    main_contribution: str = Field(description="Main contribution in 1-2 sentences")
-    methodology: List[str] = Field(description="Key methods/techniques used")
-    findings: List[str] = Field(description="Key findings or results")
-    relevance_keywords: List[str] = Field(description="Keywords for relevance matching")
+    title: str = Field(description="Paper title", default="Unknown Paper")
+    main_contribution: str = Field(description="Main contribution in 1-2 sentences", default="")
+    methodology: List[str] = Field(description="Key methods/techniques used", default=[])
+    findings: List[str] = Field(description="Key findings or results", default=[])
+    relevance_keywords: List[str] = Field(description="Keywords for relevance matching", default=[])
 
 class DocumentProcessor:
     """Process long documents intelligently"""
@@ -43,121 +43,237 @@ class DocumentProcessor:
         self.encoding = tiktoken.encoding_for_model("gpt-4")
         
     def process_cv(self, cv_text: str) -> Tuple[CVSummary, str]:
-        """Extract structured information from CV"""
+        """Extract structured information from CV with better error handling"""
         logger.info("Processing CV for structured extraction...")
         
-        parser = PydanticOutputParser(pydantic_object=CVSummary)
+        if not cv_text or len(cv_text.strip()) < 50:
+            logger.warning("CV text is too short or empty")
+            empty_summary = CVSummary()
+            return empty_summary, "No CV content provided"
         
-        # Split CV into chunks for processing
-        chunks = self.text_splitter.split_text(cv_text)
+        try:
+            # Use a simpler extraction approach without complex JSON parsing
+            cv_summary = self._extract_cv_info_simple(cv_text)
+            concise_text = self._create_concise_cv_text(cv_summary)
+            
+            return cv_summary, concise_text
+            
+        except Exception as e:
+            logger.error(f"Error processing CV: {e}")
+            # Return basic summary if processing fails
+            basic_summary = self._create_basic_cv_summary(cv_text)
+            basic_text = self._create_concise_cv_text(basic_summary)
+            return basic_summary, basic_text
+    
+    def _extract_cv_info_simple(self, cv_text: str) -> CVSummary:
+        """Simple CV extraction without complex JSON parsing"""
         
-        # Process each chunk with cheap LLM
-        chunk_summaries = []
-        for i, chunk in enumerate(chunks):
-            prompt = ChatPromptTemplate.from_template("""
-            Extract key information from this CV section:
+        # Create a simple prompt that asks for structured text output
+        prompt = f"""
+        Analyze this CV and extract key information. Provide your response in the following format:
+
+        EDUCATION:
+        - [List education entries, one per line]
+
+        RESEARCH_INTERESTS:
+        - [List research interests, one per line]
+
+        TECHNICAL_SKILLS:
+        - [List technical skills, one per line]
+
+        PUBLICATIONS:
+        - [List key publications with brief descriptions, one per line]
+
+        EXPERIENCE:
+        - [List relevant experience, one per line]
+
+        AWARDS:
+        - [List awards and honors, one per line]
+
+        CV Content:
+        {cv_text[:3000]}
+        """
+        
+        try:
+            result = self.cheap_llm.invoke(prompt)
+            response_text = result.content if hasattr(result, 'content') else str(result)
             
-            {cv_chunk}
+            # Parse the structured response
+            cv_summary = self._parse_structured_response(response_text)
+            return cv_summary
             
-            Focus on:
-            - Education details (degrees, institutions, years)
-            - Research interests and areas
-            - Technical skills
-            - Publications (include brief description)
-            - Relevant experience
-            - Awards/honors
-            
-            {format_instructions}
-            """)
-            
-            try:
-                result = self.cheap_llm.invoke(
-                    prompt.format_messages(
-                        cv_chunk=chunk,
-                        format_instructions=parser.get_format_instructions()
-                    )
-                )
-                chunk_summaries.append(result.content)
-            except Exception as e:
-                logger.warning(f"Error processing CV chunk {i}: {e}")
+        except Exception as e:
+            logger.error(f"Error in simple CV extraction: {e}")
+            return self._create_basic_cv_summary(cv_text)
+    
+    def _parse_structured_response(self, response_text: str) -> CVSummary:
+        """Parse the structured response into CVSummary"""
+        
+        sections = {
+            'education': [],
+            'research_interests': [],
+            'technical_skills': [],
+            'publications': [],
+            'experience': [],
+            'awards': []
+        }
+        
+        current_section = None
+        
+        for line in response_text.split('\n'):
+            line = line.strip()
+            if not line:
                 continue
+                
+            # Check for section headers
+            if line.upper().startswith('EDUCATION:'):
+                current_section = 'education'
+            elif line.upper().startswith('RESEARCH_INTERESTS:'):
+                current_section = 'research_interests'
+            elif line.upper().startswith('TECHNICAL_SKILLS:'):
+                current_section = 'technical_skills'
+            elif line.upper().startswith('PUBLICATIONS:'):
+                current_section = 'publications'
+            elif line.upper().startswith('EXPERIENCE:'):
+                current_section = 'experience'
+            elif line.upper().startswith('AWARDS:'):
+                current_section = 'awards'
+            elif line.startswith('-') and current_section:
+                # Add item to current section
+                item = line[1:].strip()
+                if item:
+                    sections[current_section].append(item)
         
-        # Merge summaries with expensive LLM
-        if len(chunk_summaries) > 1:
-            merge_prompt = ChatPromptTemplate.from_template("""
-            Merge these CV section summaries into a single coherent profile:
-            
-            {summaries}
-            
-            Combine duplicate information and ensure completeness.
-            
-            {format_instructions}
-            """)
-            
-            final_summary = self.expensive_llm.invoke(
-                merge_prompt.format_messages(
-                    summaries="\n\n---\n\n".join(chunk_summaries),
-                    format_instructions=parser.get_format_instructions()
-                )
-            )
-            
-            # Parse the final summary
-            cv_summary = parser.parse(final_summary.content)
-        else:
-            # If only one chunk, parse it directly
-            cv_summary = parser.parse(chunk_summaries[0] if chunk_summaries else "{}")
+        return CVSummary(**sections)
+    
+    def _create_basic_cv_summary(self, cv_text: str) -> CVSummary:
+        """Create a basic CV summary using keyword matching"""
+        text_lower = cv_text.lower()
         
-        # Create a concise text representation
-        concise_text = self._create_concise_cv_text(cv_summary)
+        # Extract education
+        education = []
+        education_keywords = ['university', 'college', 'degree', 'bachelor', 'master', 'phd', 'ph.d']
+        for line in cv_text.split('\n'):
+            if any(keyword in line.lower() for keyword in education_keywords):
+                education.append(line.strip())
+                if len(education) >= 3:
+                    break
         
-        return cv_summary, concise_text
+        # Extract skills
+        skills = []
+        skill_keywords = ['python', 'java', 'c++', 'javascript', 'machine learning', 'data analysis', 'tensorflow', 'pytorch']
+        for keyword in skill_keywords:
+            if keyword in text_lower:
+                skills.append(keyword.title())
+        
+        # Extract research interests
+        research_interests = []
+        if 'research' in text_lower or 'interest' in text_lower:
+            for line in cv_text.split('\n'):
+                if 'research' in line.lower() or 'interest' in line.lower():
+                    clean_line = line.strip()
+                    if len(clean_line) > 10 and len(clean_line) < 100:
+                        research_interests.append(clean_line)
+                        if len(research_interests) >= 3:
+                            break
+        
+        return CVSummary(
+            education=education[:3],
+            research_interests=research_interests[:5],
+            technical_skills=skills[:10],
+            publications=[],
+            experience=[],
+            awards=[]
+        )
     
     def process_paper(self, paper_text: str, max_chars: int = 1500) -> Tuple[PaperSummary, str]:
         """Process academic paper into structured summary"""
         logger.info("Processing paper for summarization...")
         
-        parser = PydanticOutputParser(pydantic_object=PaperSummary)
+        if not paper_text or len(paper_text.strip()) < 100:
+            empty_summary = PaperSummary()
+            return empty_summary, "No paper content provided"
         
-        # Take the most informative parts of the paper
-        abstract_section = self._extract_section(paper_text, ["abstract", "summary"], max_chars=800)
-        intro_section = self._extract_section(paper_text, ["introduction", "1.", "1 "], max_chars=500)
-        conclusion_section = self._extract_section(paper_text, ["conclusion", "discussion"], max_chars=500)
-        
-        combined_text = f"{abstract_section}\n\n{intro_section}\n\n{conclusion_section}"
-        
-        prompt = ChatPromptTemplate.from_template("""
-        Summarize this academic paper:
-        
-        {paper_content}
-        
-        Extract:
-        - Paper title (if found)
-        - Main contribution (1-2 sentences)
-        - Key methodologies used
-        - Main findings or results
-        - Keywords for relevance matching
-        
-        {format_instructions}
-        """)
-        
-        result = self.cheap_llm.invoke(
-            prompt.format_messages(
-                paper_content=combined_text[:max_chars],
-                format_instructions=parser.get_format_instructions()
+        try:
+            # Take the most informative parts of the paper
+            abstract_section = self._extract_section(paper_text, ["abstract", "summary"], max_chars=800)
+            intro_section = self._extract_section(paper_text, ["introduction", "1.", "1 "], max_chars=500)
+            conclusion_section = self._extract_section(paper_text, ["conclusion", "discussion"], max_chars=500)
+            
+            combined_text = f"{abstract_section}\n\n{intro_section}\n\n{conclusion_section}"
+            
+            # Simple extraction without JSON parsing
+            prompt = f"""
+            Analyze this academic paper and provide a summary in the following format:
+
+            TITLE: [Extract or infer the paper title]
+            MAIN_CONTRIBUTION: [Main contribution in 1-2 sentences]
+            METHODOLOGY: [List key methods used, separated by commas]
+            FINDINGS: [List key findings, separated by commas]
+            KEYWORDS: [List relevant keywords, separated by commas]
+
+            Paper content:
+            {combined_text[:max_chars]}
+            """
+            
+            result = self.cheap_llm.invoke(prompt)
+            response_text = result.content if hasattr(result, 'content') else str(result)
+            
+            paper_summary = self._parse_paper_response(response_text)
+            
+            # Create concise text representation
+            concise_text = (
+                f"Title: {paper_summary.title}\n"
+                f"Contribution: {paper_summary.main_contribution}\n"
+                f"Methods: {', '.join(paper_summary.methodology[:3])}\n"
+                f"Key Findings: {'; '.join(paper_summary.findings[:2])}"
             )
+            
+            return paper_summary, concise_text
+            
+        except Exception as e:
+            logger.error(f"Error processing paper: {e}")
+            basic_summary = PaperSummary(
+                title="Research Paper",
+                main_contribution="Paper analysis failed",
+                methodology=["Unknown"],
+                findings=["Analysis incomplete"],
+                relevance_keywords=["research"]
+            )
+            return basic_summary, "Paper processing failed"
+    
+    def _parse_paper_response(self, response_text: str) -> PaperSummary:
+        """Parse paper response into PaperSummary"""
+        
+        title = "Unknown Paper"
+        main_contribution = ""
+        methodology = []
+        findings = []
+        keywords = []
+        
+        for line in response_text.split('\n'):
+            line = line.strip()
+            if line.startswith('TITLE:'):
+                title = line.replace('TITLE:', '').strip()
+            elif line.startswith('MAIN_CONTRIBUTION:'):
+                main_contribution = line.replace('MAIN_CONTRIBUTION:', '').strip()
+            elif line.startswith('METHODOLOGY:'):
+                methods_str = line.replace('METHODOLOGY:', '').strip()
+                methodology = [m.strip() for m in methods_str.split(',') if m.strip()]
+            elif line.startswith('FINDINGS:'):
+                findings_str = line.replace('FINDINGS:', '').strip()
+                findings = [f.strip() for f in findings_str.split(',') if f.strip()]
+            elif line.startswith('KEYWORDS:'):
+                keywords_str = line.replace('KEYWORDS:', '').strip()
+                keywords = [k.strip() for k in keywords_str.split(',') if k.strip()]
+        
+        return PaperSummary(
+            title=title,
+            main_contribution=main_contribution,
+            methodology=methodology[:5],
+            findings=findings[:5],
+            relevance_keywords=keywords[:10]
         )
-        
-        paper_summary = parser.parse(result.content)
-        
-        # Create concise text representation
-        concise_text = (
-            f"Title: {paper_summary.title}\n"
-            f"Contribution: {paper_summary.main_contribution}\n"
-            f"Methods: {', '.join(paper_summary.methodology[:3])}\n"
-            f"Key Findings: {'; '.join(paper_summary.findings[:2])}"
-        )
-        
-        return paper_summary, concise_text
     
     def _extract_section(self, text: str, markers: List[str], max_chars: int = 1000) -> str:
         """Extract a section from text based on markers"""
@@ -196,7 +312,7 @@ class DocumentProcessor:
         if cv_summary.experience:
             parts.append(f"Experience: {'; '.join(cv_summary.experience[:2])}")
         
-        return "\n".join(parts)
+        return "\n".join(parts) if parts else "No CV information available"
 
 
 class ProgressiveContextBuilder:
@@ -229,7 +345,7 @@ class ProgressiveContextBuilder:
             included_sections.append("student_profile")
         
         # Priority 2: Professor summary
-        if professor_summary:
+        if professor_summary and professor_summary.strip():
             tokens = len(self.encoding.encode(professor_summary))
             if current_tokens + tokens < self.max_tokens * 0.8:  # Leave room for papers
                 context_parts.append(f"\nPROFESSOR RESEARCH:\n{professor_summary}")
@@ -253,11 +369,12 @@ class ProgressiveContextBuilder:
         # Priority 4: Additional CV details if space allows
         if current_tokens < self.max_tokens * 0.7:
             additional_cv = self._get_additional_cv_details(cv_summary)
-            tokens = len(self.encoding.encode(additional_cv))
-            if current_tokens + tokens < self.max_tokens:
-                context_parts.append(f"\nADDITIONAL DETAILS:\n{additional_cv}")
-                current_tokens += tokens
-                included_sections.append("additional_cv")
+            if additional_cv:
+                tokens = len(self.encoding.encode(additional_cv))
+                if current_tokens + tokens < self.max_tokens:
+                    context_parts.append(f"\nADDITIONAL DETAILS:\n{additional_cv}")
+                    current_tokens += tokens
+                    included_sections.append("additional_cv")
         
         return {
             "context": "\n".join(context_parts),
@@ -299,4 +416,4 @@ class ProgressiveContextBuilder:
         if cv_summary.publications and len(cv_summary.publications) > 3:
             details.append(f"Other Publications: {'; '.join(cv_summary.publications[3:])}")
         
-        return "\n".join(details)
+        return "\n".join(details) if details else ""

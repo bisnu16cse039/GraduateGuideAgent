@@ -104,7 +104,7 @@ class StreamlitApp:
             model_options = ["gpt-4-turbo-preview", "gpt-4", "gpt-3.5-turbo"]
             default_model = "gpt-4-turbo-preview"
         else:
-            model_options = ["gemini-1.5-flash", "gemini-pro", "gemini-1.5-pro"]
+            model_options = ["gemini-1.5-flash", "gemini-2.5-pro", "gemini-1.5-pro"]
             default_model = "gemini-1.5-flash"
 
         model_name = st.sidebar.selectbox("Model", options=model_options, index=model_options.index(default_model))
@@ -236,25 +236,146 @@ class StreamlitApp:
         
         # Professor Information
         st.markdown('<h2 class="step-header">👨‍🏫 Step 4: Professor Information</h2>', unsafe_allow_html=True)
-        professor_url = st.text_input(
-            "Professor's Profile URL:",
-            help="Link to the professor's faculty page, lab website, or academic profile"
+        
+        # Professor input method selection
+        prof_input_method = st.radio(
+            "How would you like to provide professor information?",
+            ["URL (Web scraping)", "Manual text input (Copy & Paste)"],
+            help="Choose URL if the professor's webpage is accessible, or manual input if you want to copy-paste information"
         )
         
-        # Paper URLs
+        professor_url = ""
+        professor_text = ""
+        
+        if prof_input_method == "URL (Web scraping)":
+            professor_url = st.text_input(
+                "Professor's Profile URL:",
+                help="Link to the professor's faculty page, lab website, or academic profile"
+            )
+            if professor_url:
+                st.info("💡 If this URL gets blocked (403 error), try using manual text input instead")
+        else:
+            professor_text = st.text_area(
+                "Professor's Profile Information:",
+                height=200,
+                placeholder="Paste the professor's biography, research interests, recent work, etc. from their faculty page or other sources...",
+                help="Copy and paste information about the professor's research, background, recent work, and interests"
+            )
+        
+        # Paper URLs and Text Inputs
         st.subheader("Recent Papers")
         st.markdown(
-            '<div class="info-box">Add URLs to the professor\'s recent papers for better personalization</div>',
+            '<div class="info-box">Add information about the professor\'s recent papers for better personalization. You can use URLs (if accessible) or copy-paste paper content.</div>',
             unsafe_allow_html=True
         )
         
+        # Paper input method
+        paper_input_method = st.radio(
+            "How would you like to provide paper information?",
+            ["URLs only", "Manual text only", "PDF upload", "Mix of both"],
+            key="paper_method"
+        )
+        
         paper_urls = []
+        paper_texts = []
+        
         num_papers = st.number_input("Number of papers to analyze:", min_value=0, max_value=5, value=2)
         
-        for i in range(num_papers):
-            url = st.text_input(f"Paper {i+1} URL:", key=f"paper_{i}")
-            if url:
-                paper_urls.append(url)
+        if paper_input_method == "URLs only":
+            st.subheader("📄 Paper URLs")
+            for i in range(num_papers):
+                url = st.text_input(f"Paper {i+1} URL:", key=f"paper_url_{i}")
+                if url:
+                    paper_urls.append(url)
+                    
+        elif paper_input_method == "Manual text only":
+            st.subheader("📄 Paper Content (Copy & Paste)")
+            for i in range(num_papers):
+                text = st.text_area(
+                    f"Paper {i+1} Content:",
+                    height=150,
+                    key=f"paper_text_{i}",
+                    placeholder="Paste the paper's title, abstract, key sections, or full text here...",
+                    help="Include title, abstract, methodology, findings, and any other relevant content"
+                )
+                if text.strip():
+                    paper_texts.append(text.strip())
+        
+        elif paper_input_method == "PDF upload":
+            st.subheader("📎 Upload PDF Papers")
+            uploaded_pdfs = st.file_uploader(
+                "Upload PDF papers:",
+                accept_multiple_files=True,
+                type=['pdf'],
+                help="Upload PDF files of research papers for analysis"
+            )
+            
+            if uploaded_pdfs:
+                st.success(f"✅ {len(uploaded_pdfs)} PDF(s) uploaded successfully")
+                
+                # Process PDFs and add to paper_texts
+                for i, pdf_file in enumerate(uploaded_pdfs):
+                    try:
+                        pdf_text = self.extract_text_from_pdf(pdf_file)
+                        if pdf_text and pdf_text.strip():
+                            paper_texts.append(pdf_text)
+                            st.info(f"📄 Extracted text from {pdf_file.name} ({len(pdf_text)} characters)")
+                            
+                            # Show preview
+                            with st.expander(f"Preview: {pdf_file.name}"):
+                                st.text(pdf_text[:500] + "..." if len(pdf_text) > 500 else pdf_text)
+                    except Exception as e:
+                        st.error(f"❌ Error processing {pdf_file.name}: {str(e)}")
+                    
+        else:  # Mix of both
+            st.subheader("📄 Papers (URLs, Manual Text, and PDFs)")
+            for i in range(num_papers):
+                st.markdown(f"**Paper {i+1}:**")
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    url = st.text_input(f"URL (optional):", key=f"paper_url_mix_{i}")
+                    if url:
+                        paper_urls.append(url)
+                
+                with col2:
+                    text = st.text_area(
+                        f"Manual text (optional):",
+                        height=100,
+                        key=f"paper_text_mix_{i}",
+                        placeholder="Paste paper content here...",
+                    )
+                    if text.strip():
+                        paper_texts.append(text.strip())
+            
+            # PDF upload for mix option
+            st.subheader("📎 Additional PDF Papers")
+            uploaded_pdfs = st.file_uploader(
+                "Upload additional PDF papers (optional):",
+                accept_multiple_files=True,
+                type=['pdf'],
+                help="Upload PDF files of research papers for analysis",
+                key="mix_pdf_upload"
+            )
+            
+            if uploaded_pdfs:
+                st.success(f"✅ {len(uploaded_pdfs)} PDF(s) uploaded successfully")
+                
+                # Process PDFs and add to paper_texts
+                for i, pdf_file in enumerate(uploaded_pdfs):
+                    try:
+                        pdf_text = self.extract_text_from_pdf(pdf_file)
+                        if pdf_text and pdf_text.strip():
+                            paper_texts.append(pdf_text)
+                            st.info(f"📄 Extracted text from {pdf_file.name} ({len(pdf_text)} characters)")
+                            
+                            # Show preview
+                            with st.expander(f"Preview: {pdf_file.name}"):
+                                st.text(pdf_text[:500] + "..." if len(pdf_text) > 500 else pdf_text)
+                    except Exception as e:
+                        st.error(f"❌ Error processing {pdf_file.name}: {str(e)}")
+        
+        # Remove the separate PDF upload section since it's now integrated above
         
         target_filters = {
             "country": target_country if target_country else None,
@@ -266,7 +387,9 @@ class StreamlitApp:
             "background_summary": background_summary,
             "target_filters": target_filters,
             "professor_url": professor_url,
-            "paper_urls": paper_urls
+            "professor_text": professor_text,
+            "paper_urls": paper_urls,
+            "paper_texts": paper_texts
         }
     
     def run_workflow(self, user_input: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
@@ -283,7 +406,8 @@ class StreamlitApp:
                 # Simulate progress updates (in real implementation, you'd hook into the actual workflow)
                 steps = [
                     "Analyzing your profile...",
-                    "Researching professor's work...",
+                    "Processing professor information...",
+                    "Analyzing papers and research...",
                     "Generating personalized email...",
                     "Evaluating email quality...",
                     "Finalizing draft..."
@@ -292,10 +416,17 @@ class StreamlitApp:
                 for i, step in enumerate(steps):
                     status_text.text(step)
                     progress_bar.progress((i + 1) / len(steps))
-                    # In real implementation, this would be replaced by actual workflow progress
                 
-                # Run the actual workflow
-                result = self.agent.run(**user_input)
+                # Run the actual workflow with new parameters
+                result = self.agent.run(
+                    cv_content=user_input.get("cv_content", ""),
+                    background_summary=user_input.get("background_summary", ""),
+                    target_filters=user_input.get("target_filters", {}),
+                    professor_url=user_input.get("professor_url", ""),
+                    professor_text=user_input.get("professor_text", ""),
+                    paper_urls=user_input.get("paper_urls", []),
+                    paper_texts=user_input.get("paper_texts", [])
+                )
                 
                 progress_bar.progress(1.0)
                 status_text.text("✅ Workflow completed!")
@@ -304,6 +435,7 @@ class StreamlitApp:
                 
             except Exception as e:
                 st.error(f"❌ Workflow failed: {e}")
+                st.error("💡 Try using manual text input if URLs are being blocked")
                 return None
     
     def display_results(self, result: Dict[str, Any]):
@@ -311,6 +443,29 @@ class StreamlitApp:
         st.markdown('<h2 class="step-header">📧 Generated Email Draft</h2>', unsafe_allow_html=True)
         
         if result and result.get('final_draft'):
+            # Show processing information
+            if result.get('audit_log'):
+                with st.expander("📊 Processing Information"):
+                    audit_log = result['audit_log']
+                    
+                    # Find relevant log entries
+                    for entry in audit_log:
+                        if entry.get('action') == 'professor_analysis':
+                            st.info(f"✅ Processed {entry.get('papers_processed', 0)} papers using {entry.get('context_tokens', 0)} tokens")
+                            if entry.get('used_manual_prof_text'):
+                                st.info("📝 Used manual professor text input")
+                            if entry.get('used_manual_papers', 0) > 0:
+                                st.info(f"📝 Used {entry.get('used_manual_papers')} manual paper inputs")
+                        elif entry.get('action') == 'profile_extraction':
+                            st.info(f"✅ CV processed successfully ({entry.get('cv_tokens', 0)} tokens)")
+            
+            # Show errors if any
+            if result.get('errors'):
+                with st.expander("⚠️ Processing Warnings", expanded=True):
+                    for error in result['errors']:
+                        st.warning(error)
+                    st.info("💡 Consider using manual text input if URLs are blocked or inaccessible")
+            
             # Quality metrics
             col1, col2, col3 = st.columns(3)
             with col1:
@@ -382,6 +537,24 @@ class StreamlitApp:
             unsafe_allow_html=True
         )
         
+        # New features information
+        with st.expander("🆕 New Features & Improvements", expanded=False):
+            st.markdown("""
+            **Recent Updates:**
+            - 🔧 **Fixed JSON parsing errors** - More reliable document processing
+            - 📝 **Manual text input** - Copy & paste professor profiles and paper content
+            - 📎 **PDF upload** - Upload research papers directly
+            - 🌐 **Better web scraping** - Improved handling of blocked URLs (403 errors)
+            - 💰 **Cost optimization** - Uses cheaper models for processing, expensive models only for final email
+            - 🧠 **Smart context building** - Prioritizes most important information within token limits
+            
+            **When to use manual input:**
+            - Professor's website blocks automated access (403 error)
+            - You want to provide specific information not available on the website
+            - Research papers are behind paywalls or not accessible via URL
+            - You have PDFs of papers you want to analyze
+            """)
+        
         # Sidebar configuration
         config = self.sidebar_config()
         
@@ -393,13 +566,33 @@ class StreamlitApp:
         # Main input section
         user_input = self.input_section()
         
-        # Validation
-        required_fields = ['cv_content', 'background_summary', 'professor_url']
-        missing_fields = [field for field in required_fields if not user_input.get(field)]
-        
-        if missing_fields:
-            st.warning(f"⚠️ Please fill in the following required fields: {', '.join(missing_fields)}")
+        # Updated validation - now more flexible
+        if not user_input.get('cv_content'):
+            st.warning("⚠️ Please provide your CV/Resume content.")
             return
+        
+        if not user_input.get('background_summary'):
+            st.warning("⚠️ Please provide your research background summary.")
+            return
+        
+        # Check if at least some professor information is provided
+        has_prof_info = (
+            user_input.get('professor_url') or 
+            user_input.get('professor_text')
+        )
+        
+        if not has_prof_info:
+            st.warning("⚠️ Please provide professor information (either URL or manual text).")
+            return
+        
+        # Check if at least some paper information is provided
+        has_paper_info = (
+            user_input.get('paper_urls') or 
+            user_input.get('paper_texts')
+        )
+        
+        if not has_paper_info:
+            st.info("💡 Consider adding paper information for more personalized emails.")
         
         # Run workflow button
         st.markdown('<h2 class="step-header">🚀 Generate Email</h2>', unsafe_allow_html=True)
